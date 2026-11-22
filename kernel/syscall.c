@@ -7,14 +7,17 @@
 #include "syscall.h"
 #include "defs.h"
 
+extern uint64 sys_interpose(void);
+
 // Fetch the uint64 at addr from the current process.
 int
 fetchaddr(uint64 addr, uint64 *ip)
 {
   struct proc *p = myproc();
-  if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed, in case of overflow
+  if (addr >= p->sz ||
+      addr + sizeof(uint64) > p->sz) // both tests needed, in case of overflow
     return -1;
-  if(copyin(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0)
+  if (copyin(p->pagetable, p->sz, (char *)ip, addr, sizeof(*ip)) != 0)
     return -1;
   return 0;
 }
@@ -25,7 +28,7 @@ int
 fetchstr(uint64 addr, char *buf, int max)
 {
   struct proc *p = myproc();
-  if(copyinstr(p->pagetable, buf, addr, max) < 0)
+  if (copyinstr(p->pagetable, p->sz, buf, addr, max) < 0)
     return -1;
   return strlen(buf);
 }
@@ -70,7 +73,7 @@ argaddr(int n, uint64 *ip)
 
 // Fetch the nth word-sized system call argument as a null-terminated string.
 // Copies into buf, at most max.
-// Returns string length if OK (including nul), -1 if error.
+// Returns string length if OK (not including nul), -1 if error.
 int
 argstr(int n, char *buf, int max)
 {
@@ -101,32 +104,58 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
+extern uint64 sys_sync(void);
+
+extern uint64 sys_sigalarm(void);
+extern uint64 sys_sigreturn(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
 static uint64 (*syscalls[])(void) = {
-[SYS_fork]    sys_fork,
-[SYS_exit]    sys_exit,
-[SYS_wait]    sys_wait,
-[SYS_pipe]    sys_pipe,
-[SYS_read]    sys_read,
-[SYS_kill]    sys_kill,
-[SYS_exec]    sys_exec,
-[SYS_fstat]   sys_fstat,
-[SYS_chdir]   sys_chdir,
-[SYS_dup]     sys_dup,
-[SYS_getpid]  sys_getpid,
-[SYS_sbrk]    sys_sbrk,
-[SYS_pause]   sys_pause,
-[SYS_uptime]  sys_uptime,
-[SYS_open]    sys_open,
-[SYS_write]   sys_write,
-[SYS_mknod]   sys_mknod,
-[SYS_unlink]  sys_unlink,
-[SYS_link]    sys_link,
-[SYS_mkdir]   sys_mkdir,
-[SYS_close]   sys_close,
+  // clang-format off
+  [SYS_fork]      = sys_fork,
+  [SYS_exit]      = sys_exit,
+  [SYS_wait]      = sys_wait,
+  [SYS_pipe]      = sys_pipe,
+  [SYS_read]      = sys_read,
+  [SYS_kill]      = sys_kill,
+  [SYS_exec]      = sys_exec,
+  [SYS_fstat]     = sys_fstat,
+  [SYS_chdir]     = sys_chdir,
+  [SYS_dup]       = sys_dup,
+  [SYS_getpid]    = sys_getpid,
+  [SYS_sbrk]      = sys_sbrk,
+  [SYS_pause]     = sys_pause,
+  [SYS_uptime]    = sys_uptime,
+  [SYS_open]      = sys_open,
+  [SYS_write]     = sys_write,
+  [SYS_mknod]     = sys_mknod,
+  [SYS_unlink]    = sys_unlink,
+  [SYS_link]      = sys_link,
+  [SYS_mkdir]     = sys_mkdir,
+  [SYS_close]     = sys_close,
+  [SYS_sync]      = sys_sync,
+  [SYS_interpose] = sys_interpose,
+  [SYS_sigalarm] sys_sigalarm,
+  [SYS_sigreturn] sys_sigreturn,
+  // clang-format on
 };
+
+// Allow a masked open/exec only when its pathname (argument 0)
+// equals the process's allowed path. For part 1 the allowed path
+// is "-", so no real pathname ever matches and the syscall stays
+// blocked; for part 2 a matching pathname lets it through.
+static int
+interpose_allowed(struct proc *p, int num)
+{
+  char path[MAXPATH];
+
+  if (num != SYS_open && num != SYS_exec)
+    return 0;
+  if (argstr(0, path, MAXPATH) < 0)
+    return 0;
+  return strcmp(path, p->syscall_path) == 0;
+}
 
 void
 syscall(void)
@@ -135,13 +164,18 @@ syscall(void)
   struct proc *p = myproc();
 
   num = p->trapframe->a7;
-  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+  if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // Sandbox: if this syscall's bit is set in the mask, reject it,
+    // unless it is open/exec with a pathname matching the allowed path.
+    if ((p->syscall_mask & (1 << num)) && !interpose_allowed(p, num)) {
+      p->trapframe->a0 = -1;
+      return;
+    }
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
     p->trapframe->a0 = syscalls[num]();
   } else {
-    printf("%d %s: unknown sys call %d\n",
-            p->pid, p->name, num);
+    printk("%d %s: unknown sys call %d\n", p->pid, p->name, num);
     p->trapframe->a0 = -1;
   }
 }

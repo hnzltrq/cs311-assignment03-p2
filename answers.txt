@@ -1,0 +1,52 @@
+1. Which registers hold arguments? Which one holds 13?
+
+Looking at the call site in main:
+
+
+2c: li a2,13
+2e: li a1,12
+30: auipc a0,0x1
+34: addi a0,a0,-1872   # a0 = address of "%d %d\n"
+38: jal printf
+
+Arguments to functions go in a0–a7, in order. Here a0 holds the format string's address, a1 holds 12, and a2 holds 13.
+
+2. Where is the call to f? Where is the call to g?
+
+There isn't one — and this confirms the hint about inlining. Looking at the call site again: a1 is loaded directly with li a1,12, not computed by jumping into f. The source says f(8) + 1, and since 8 is a compile-time constant, the compiler evaluated the whole thing at compile time: g(8) = 8+3 = 11, f(8) = g(8) = 11, f(8)+1 = 12. It just substituted the literal 12. Both f and g still exist as standalone compiled functions in the binary (you can see their bodies at addresses 0x0 and 0x12), but main never actually calls either of them — the calls were constant-folded away.
+
+3. Address of printf?
+
+000000000000072c <printf>:
+
+0x72c.
+
+4. Value in ra right after the jalr/jal to printf?
+
+
+38: 6f4000ef   jal 72c <printf>
+3c: 4501       li a0,0
+
+jal/jalr stores the address of the next instruction into ra. That's the instruction at 0x3c. So ra = 0x3c.
+
+5. The printf("H%x Wo%s", 57616, (char*)&i) output:
+
+57616 = 0xe110. Little-endian layout of i = 0x00646c72 in memory:
+
+byte 0: 0x72 'r'
+byte 1: 0x6c 'l'
+byte 2: 0x64 'd'
+byte 3: 0x00 '\0'
+
+Reading (char*)&i as a string gives "rld". Output: He110 World.
+
+6. Big-endian equivalent:
+
+
+unsigned int i = 0x726c6400;
+
+57616 stays the same — endianness affects how multi-byte values in memory are ordered, not how a register value is formatted by %x.
+
+7. printf("x=%d y=%d", 3) — what prints after y=?
+
+Some unpredictable/garbage value — not a fixed number. Only one argument (3) was actually passed, going into a1 per the calling convention you can see above. The second %d tells vprintf to read whatever's sitting in the next argument slot (a2, or the corresponding stack slot once the register arguments run out) — but nothing was ever placed there for this call. printf has no way to check the format string against the real argument count; it just trusts the format string and reads whatever register/memory the calling convention says the next argument would occupy, which holds leftover data from earlier in the program.
